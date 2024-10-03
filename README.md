@@ -17,7 +17,7 @@
 
 ## Introduction
 
-The focus of our project is to predict labor actions—specifically, whether they result in a strike or not. After evaluating various approaches, we selected the LASSO logistic regression model due to its strong performance. Our model achieved an accuracy rate of **92.79%** on the training set and a ROC AUC of **96.74%**, demonstrating effective classification of strike versus non-strike events. Testing on the latest data maintained an accuracy rate of **88.13%**. This report elaborates on our data handling, modeling processes, and performance evaluation.
+The focus of our project is to predict labor actions—specifically, whether they result in a strike or not. After evaluating various approaches, we selected the LASSO logistic regression model due to its strong performance. Our model achieved an accuracy rate of **92.79%** on the training set and a ROC AUC of **96.74%**, demonstrating effective classification of strike versus non-strike events. Testing on the latest data maintained an accuracy rate of **88.13%**. This report elaborates on our data handling, modeling processes, and performance evaluation. The final analysis script can be found [here](analysis/final_analysis/final_analysis.qmd). The following are the [.html](analysis/final_analysis/final_analysis.html) and [.pdf](analysis/final_analysis/final_analysis.pdf) version of the project's memo.
 
 ---
 
