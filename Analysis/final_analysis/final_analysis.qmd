@@ -1,9 +1,9 @@
 ---
-title: "Predicting Strike Outcomes with LASSO Logistic Regression: An R Programming Approach to Labor Action Event Analysis"
+title: "Analyzing Labor Action Events: Predicting Strike Outcomes with R and Tidymodels"
 subtitle: "GPIM 452 - Group 1"
 author: "Putra Farrel Azhar, Lauryn Edwards, Meilin Chen, Yanji Wang"
 date: "March 18, 2024"
-format: pdf
+format: html
 fontsize: 10.5pt
 execute:
   message: false
@@ -23,11 +23,11 @@ In dealing with missing variables, we adopted different strategies based on the 
 
 ```{r message = FALSE}
 # Preliminary data wrangling and cleaning
-## Loading packages and set seed id
+
 # clean the environment
 rm(list = ls())
 
-# oad all the packages
+# load all the dependencies and packages
 library(haven)
 library(tidyverse)
 library(readxl)
@@ -37,20 +37,22 @@ library(zipcodeR)
 library(tigris)
 library(sf)
 library(tidymodels)
+library(glmnet)
 library(yardstick)
+library(doParallel)
+library(vip)
 
 # set the reproducibility 
 set.seed(0000)
 
 # loading the raw LAT data
-data_lat <- read_excel(here("Data Raw", "Labor action tracker data 12.4.23.xlsx"))
+data_lat <- read_excel(here("data_raw", "labor_action_tracker_data_12.4.23.xlsx"))
 
 ```
 
 ```{r, results='hide'}
 ## Creating a county index for the LAT dataset
-# filtering only labor actions with one location (note you should handle multiple locations
-# as determined by your group) and separating latitude and longitude into new variables
+# filtering only labor actions with one location
 data_lat <- data_lat |>
   clean_names() |>
   filter(number_of_locations == 1) |>
@@ -80,9 +82,9 @@ names(data_lat)[which(names(data_lat) == "NAMELSAD")] <- "county"
 ```{r, results='hide'}
 ## Aggregate the individual ACS dataset
 # merging the ACS datasets
-MC <- read.csv(here("Data Raw", "acs_data_clean(MC).csv"))
-YW <- read.csv(here("Data Raw", "acs_data_clean(YW).csv"))
-LE <- read.csv(here("Data Raw", "acs_data_clean(LE).csv"))
+MC <- read.csv(here("data_raw", "acs_data_clean(MC).csv"))
+YW <- read.csv(here("data_raw", "acs_data_clean(YW).csv"))
+LE <- read.csv(here("data_raw", "acs_data_clean(LE).csv"))
 
 LE <- LE %>% rename(county = NAME)
 
@@ -122,7 +124,7 @@ combined_acs <- read_csv("combined_acs.csv")
 combined_acs$county <- sub(" .*", "", combined_acs$county)
 data_lat$county <- sub(" .*", "", data_lat$county)
 
-# join with tha LAT dataset
+# join with the LAT dataset
 data <- left_join(data_lat, combined_acs, by = c("county" = "county", "state" = "state"))
 data <- data %>% select(-contains(".x"))
 data <- data %>% select(-contains(".y"))
@@ -133,7 +135,7 @@ write.csv(data, file = "general_data.csv", row.names = FALSE)
 
 ```{r message = FALSE}
 ## Removing white spaces and cleaning the variable names
-df <- read_csv(here("Data Raw", "general_data.csv"))
+df <- read_csv(here("data_raw", "general_data.csv"))
 
 # creating a function to remove white spaces safely
 safeTrim <- function(x) {
@@ -180,7 +182,7 @@ convert_to_days <- function(amount, unit) {
   return(result)}
 
 # Apply the conversion function to the data frame
-# Transfer all durations into day-based measurement
+# Transfer all duration into day-based measurement
 df_clean <- df_clean %>%
   mutate(duration_amount = ifelse(duration_unit %in% c("Minutes", "Hours"),
                                   convert_to_days(duration_amount, duration_unit),
@@ -191,7 +193,7 @@ df_clean$duration_amount[is.na(df_clean$duration_amount)] <- 1
 ```
 
 ```{r}
-## Modifying timestamp, start date, and end date as dates
+## Modifying time stamp, start date, and end date as dates
 df_clean$start_date <- as.Date(df_clean$start_date, format = "%Y-%m-%d")
 
 df_clean$end_date <- as.Date(df_clean$end_date, format = "%Y-%m-%d")
@@ -261,7 +263,7 @@ df_sub$authorized <- as.character(df_sub$authorized)
 ```
 
 ```{r}
-## Remove timeframe variables
+## Remove time frame variables
 df_sub <- df_sub %>%
   select(-start_date, -end_date, -timestamp)
 ```
@@ -395,7 +397,7 @@ To evaluate the performance of our LASSO logistics regression model, we used a C
 ```{r}
 ## LASSO Logistic model with the lowest RMSE
 best_accuracy <- lasso_grid |>
-  select_best("accuracy")
+  select_best(metric = "accuracy")
 
 final_lasso <- finalize_workflow(
   lasso_wf |> add_model(tune_spec),
@@ -494,7 +496,7 @@ print(accuracy_rate_old)
 ```{r}
 # Preliminary data wrangling and cleaning on new dataset
 # Load the test dataset
-data_new <- read_excel(here("Data Raw", "Labor action tracker data 2.26.24.xlsx"))
+data_new <- read_excel(here("data_raw", "labor_action_tracker_data_2.26.24.xlsx"))
 ```
 
 ```{r, fig.show='hide', results='hide'}
