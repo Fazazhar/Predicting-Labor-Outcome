@@ -1,0 +1,718 @@
+---
+title: "Predicting Strike Outcomes with LASSO Logistic Regression: An R Programming Approach to Labor Action Event Analysis"
+subtitle: "GPIM 452 - Group 1"
+author: "Putra Farrel Azhar, Lauryn Edwards, Meilin Chen, Yanji Wang"
+date: "March 18, 2024"
+format: pdf
+fontsize: 10.5pt
+execute:
+  message: false
+  warning: false
+  echo: false
+---
+
+## 1. Introduction
+
+The topic chosen by our group is the prediction of a labor action, whether it is a strike or a non-strike. After carefully considering and evaluating various options to find the most suitable approach for predicting strike or non-strike labor behavior, we decided on the LASSO logistics model as our prediction model. According to our analysis, the LASSO logistics model we chose exhibited impressive performance on the training set, achieving an accuracy rate of 92.79% and a ROC AUC of 96.74%. This indicated its ability to classify between strike and non-strike events effectively. Ultimately, testing on the latest data showed a maintained accuracy rate of 88.13%. The following part of this report will mainly focus on how we deal with the data, run different models, and evaluate their performance.
+
+## 2. Data
+
+In addition to the provided labor action data dataset (LAT), we incorporated the American Community Survey (ACS) data to enrich our analysis. This supplementary dataset offers valuable demographic and socio-economic information that can provide deeper insights into the factors influencing labor actions.To enhance the compatibility of the dataset, our team implemented various adjustments. We first filtered and cleaned the LAT dataset, keeping only labor actions with a single location and extracting longitude and latitude information. Next, we downloaded the shapefile for U.S. county boundaries and converted it to our dataset's coordinate reference system. By spatially joining the dataset with the county boundary data, we associated each labor action with its respective county, facilitating the merge with ACS data to generate a dataset with the units of observations being counties.Next, we create a binary variable that shows whether the labor action is a Strike. Based on the value of the “strike_or_non-strike” column, if it is "Strike," then the binary variable is set to 1. Then, for those observations with various measurement units, such as the labor action duration unit, which varies from days to seconds, we standardized the unit and transferred all the observations into a single unit measured. In terms of data cleansing and modifying, we standardized names and dates to ensure consistency and accuracy of datasets. We removed white space to improve the readability and cleanliness of the data. We identified and eliminated redundant columns that do not contribute significantly to our predictive model. We preserved only the first value for variables containing multiple values, simplifying the data set for analysis. Additionally, given that the LASSO model does not support time variables, we removed all time-related variables to meet the model's requirements better.
+
+In dealing with missing variables, we adopted different strategies based on the nature of the variables and the number of missing values to maximize data integrity and usability. Firstly, we chose to remove all the columns directly for variables with many missing values and with minimal impact on the model. This approach benefits the model by reducing interference and allowing it to focus on relevant and representative variables. Secondly, we filled in missing values with "Missing" for categorical variables. This step helps maintain the structural integrity of the data, avoiding situations where missing values are ignored or removed during analysis. Lastly, for variables with fewer missing values, we filled them with the median. This method helps preserve the distribution characteristics of the data, preventing data biases caused by missing values and thus improving the accuracy and stability of the model.
+
+```{r message = FALSE}
+# Preliminary data wrangling and cleaning
+## Loading packages and set seed id
+# clean the environment
+rm(list = ls())
+
+# oad all the packages
+library(haven)
+library(tidyverse)
+library(readxl)
+library(here)
+library(janitor)
+library(zipcodeR)
+library(tigris)
+library(sf)
+library(tidymodels)
+library(yardstick)
+
+# set the reproducibility 
+set.seed(0000)
+
+# loading the raw LAT data
+data_lat <- read_excel(here("Data Raw", "Labor action tracker data 12.4.23.xlsx"))
+
+```
+
+```{r, results='hide'}
+## Creating a county index for the LAT dataset
+# filtering only labor actions with one location (note you should handle multiple locations
+# as determined by your group) and separating latitude and longitude into new variables
+data_lat <- data_lat |>
+  clean_names() |>
+  filter(number_of_locations == 1) |>
+  mutate(lat = as.numeric(sub(",.*", "", latitude_longitude)),
+         long = as.numeric(sub(".*, ", "", latitude_longitude))) |>
+  select(-latitude_longitude) |>
+  filter(!is.na(lat), !is.na(long))
+
+# download the U.S. counties shape file
+counties <- counties(cb = TRUE)
+
+# convert the latitude and longitude into sf objects
+data_lat <- st_as_sf(data_lat, 
+                     coords = c("long", "lat"), 
+                     crs = 4326)
+
+# transform counties shape file into the same CRS as lat_long
+counties <- st_transform(counties, st_crs(data_lat))
+
+# spatial join of data with counties
+data_lat <- st_join(data_lat, counties)
+
+# find the county variable and rename it
+names(data_lat)[which(names(data_lat) == "NAMELSAD")] <- "county"
+```
+
+```{r, results='hide'}
+## Aggregate the individual ACS dataset
+# merging the ACS datasets
+MC <- read.csv(here("Data Raw", "acs_data_clean(MC).csv"))
+YW <- read.csv(here("Data Raw", "acs_data_clean(YW).csv"))
+LE <- read.csv(here("Data Raw", "acs_data_clean(LE).csv"))
+
+LE <- LE %>% rename(county = NAME)
+
+# create the state vairbales
+MC$state <- sub('.*,\\s*', '', MC$county)
+YW$state <- sub('.*,\\s*', '', YW$county)
+LE$state <- sub('.*,\\s*', '', LE$county)
+
+# trimming white spaces
+MC$state <- trimws(MC$state)
+YW$state <- trimws(YW$state)
+LE$state <- trimws(LE$state)
+
+# perform the initial left join
+# Perform the initial left join
+acs <- merge(MC, YW, by = "county", all.x = TRUE)
+acs <- merge(acs, LE, by = "county", all.x = TRUE)
+
+#remove the redundant observations when joining
+acs <- acs %>% select(-contains(".x"))
+acs <- acs %>% select(-contains(".y"))
+
+# glimpsing the dataset
+glimpse(acs)
+
+#export the combined dataset
+# Save the acs dataset as a CSV file
+write.csv(acs, file = "combined_acs.csv", row.names = FALSE)
+```
+
+```{r, results='hide'}
+## Merging the LAT and the combined ACS dataset by counties
+# import the combined acs dataset
+combined_acs <- read_csv("combined_acs.csv")
+
+# edit the county variable
+combined_acs$county <- sub(" .*", "", combined_acs$county)
+data_lat$county <- sub(" .*", "", data_lat$county)
+
+# join with tha LAT dataset
+data <- left_join(data_lat, combined_acs, by = c("county" = "county", "state" = "state"))
+data <- data %>% select(-contains(".x"))
+data <- data %>% select(-contains(".y"))
+
+# export the dataset
+write.csv(data, file = "general_data.csv", row.names = FALSE)
+```
+
+```{r message = FALSE}
+## Removing white spaces and cleaning the variable names
+df <- read_csv(here("Data Raw", "general_data.csv"))
+
+# creating a function to remove white spaces safely
+safeTrim <- function(x) {
+  if(is.factor(x)) { 
+    as.factor(trimws(as.character(x)))
+  } else if(is.character(x)) {
+    trimws(x)
+  } else if(is.numeric(x)) {
+    x 
+  } else {
+    x 
+  }
+}
+
+# executing the safeTrim function
+df[] <- lapply(df, safeTrim)
+
+# cleaning the column names
+df_clean <- clean_names(df)
+```
+
+```{r}
+# Feature Engineering
+
+## Creating a binary strike for dependent variable
+# Remove the lockout values from strike_or_protest column
+df_clean <- df_clean[df_clean$strike_or_protest != "Lockout", ]
+
+# Create a binary variable for strike
+df_clean$strike_binary <- ifelse(df_clean$strike_or_protest == "Strike", 1, 0)
+
+# Move the strike binary variable to the front
+last_column <- ncol(df_clean)
+
+df_clean <- df_clean[, c(1, last_column, 2:(last_column - 1))]
+```
+
+```{r}
+## Adjusting LAT event duration into a unit of 'days'
+# Define a function to convert minutes or hours to days
+convert_to_days <- function(amount, unit) {
+  result <- ifelse(unit == "Minutes", amount / (24 * 60),
+                   ifelse(unit == "Hours", amount / 24, amount))
+  return(result)}
+
+# Apply the conversion function to the data frame
+# Transfer all durations into day-based measurement
+df_clean <- df_clean %>%
+  mutate(duration_amount = ifelse(duration_unit %in% c("Minutes", "Hours"),
+                                  convert_to_days(duration_amount, duration_unit),
+                                  duration_amount))
+
+# Changing all NAs in duration_amount to a value of 1-day
+df_clean$duration_amount[is.na(df_clean$duration_amount)] <- 1
+```
+
+```{r}
+## Modifying timestamp, start date, and end date as dates
+df_clean$start_date <- as.Date(df_clean$start_date, format = "%Y-%m-%d")
+
+df_clean$end_date <- as.Date(df_clean$end_date, format = "%Y-%m-%d")
+
+```
+
+```{r}
+## Removing unnecessary and redundant columns
+df_sub <- select(df_clean, -c(number_of_locations,
+                              duration_unit,
+                              source,
+                              notes,
+                              geometry,
+                              statefp,
+                              countyfp,
+                              countyns,
+                              affgeoid,
+                              name,
+                              county,
+                              stusps,
+                              state_name,
+                              lsad,
+                              aland,
+                              awater,
+                              strike_or_protest,
+                              tot_m,
+                              bargaining_unit_size,
+                              local,
+                              tot_f,
+                              hh_income_med,
+                              pub_assist,
+                              gini,
+                              labor_organization
+                              ))
+
+```
+
+```{r}
+## Handling NAs in Categorical Columns
+# Changing NAs to the categorical value of "missing"
+df_sub <- df_sub %>%
+  mutate(
+    employer = ifelse(is.na(employer), "MISSING", employer),
+    industry = ifelse(is.na(industry), "MISSING", industry),
+    address = ifelse(is.na(address), "MISSING", address),
+    zip_code = ifelse(is.na(zip_code), "MISSING", zip_code),
+    worker_demands = ifelse(is.na(worker_demands), "MISSING", worker_demands),
+    authorized = ifelse(is.na(authorized), "MISSING", authorized),
+    city = ifelse(is.na(city), "MISSING", city)
+  )
+```
+
+```{r}
+## Handling Multiple Values in Categorical Columns
+df_sub$employer <- sapply(strsplit(df_sub$employer, ";"), function(x) x[1])
+
+df_sub$industry <- sapply(strsplit(df_sub$industry, ","), function(x) x[1])
+
+df_sub$worker_demands <- sapply(strsplit(df_sub$worker_demands, ","), function(x) x[1])
+```
+
+```{r}
+## Fixing the variable types
+df_sub$strike_binary <- as.factor(df_sub$strike_binary)
+
+df_sub$authorized <- as.character(df_sub$authorized)
+```
+
+```{r}
+## Remove timeframe variables
+df_sub <- df_sub %>%
+  select(-start_date, -end_date, -timestamp)
+```
+
+```{r}
+## Final Check
+# Creating a data frame to see the number of NAs by columns
+na_count_df <- data.frame(column = names(df_sub),
+                          na_count = colSums(is.na(df_sub)),
+                          type = sapply(df_sub, class))
+
+# Display the data frame
+view(na_count_df)
+
+# export the dataset
+write.csv(df_sub, file = "final_data.csv", row.names = FALSE)
+```
+
+```{r}
+# LASSO Logistic workflow
+
+## Splitting the dataset
+world_split <- initial_split(df_sub, prop = 0.8, strata = strike_binary)
+world_train <- training(world_split)
+world_test <- testing(world_split)
+```
+
+```{r}
+## Formulating the recipe
+world_recipe <- 
+  recipe(strike_binary ~ ., data = world_train) |> 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_novel(all_nominal(), -all_outcomes()) |>
+  step_impute_median(all_numeric()) |>
+  step_scale(all_numeric()) |>
+  step_center(all_numeric())
+
+```
+
+```{r}
+## Create the workflow
+lasso_wf <- workflow() |> 
+  add_recipe(world_recipe)
+```
+
+```{r}
+# LASSO Logistic model using a predetermined penalty value of 0.5
+
+## Specifying the type of model
+# Model specification using logistic regression with LASSO penalty
+lasso_model <- logistic_reg(penalty = 0.5, mixture = 1) %>%
+  set_engine("glmnet")
+```
+
+```{r}
+## Lasso Logistic Fit
+lasso_fit <- lasso_wf |> 
+  add_model(lasso_model) |> 
+  fit(data = world_train)
+```
+
+```{r, results='hide'}
+## Lasso Logistic Estimates
+lasso_estimates <- lasso_fit |> 
+  extract_fit_parsnip() |> 
+  tidy() |> 
+  print()
+
+lasso_estimates |> 
+  filter(estimate == 0) |> 
+  nrow()
+
+```
+
+```{r}
+# LASSO Logistic model using tune spec to find the best 'penalty' parameter
+
+## Specifying the type of model
+# Model specification using logistic regression with LASSO penalty
+tune_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet")
+```
+
+```{r}
+## Generating folds for cross validation and penalty parameters
+# the sequence of penalty parameters to search over
+penalty_grid <- tibble(
+  penalty = seq(0, 2, by = .01)
+)
+
+# Generate folds for cross validation
+folds <- vfold_cv(world_train, v = 5)
+```
+
+```{r}
+doParallel::registerDoParallel()
+
+lasso_grid <- tune_grid(
+  lasso_wf |> add_model(tune_spec),
+  resamples = folds,   # 5 fold cross validation
+  grid = penalty_grid
+)
+```
+
+```{r, results='hide'}
+# collect_metrics() lets us look at the predictive output of our models
+lasso_grid_metrics <- lasso_grid |>
+  collect_metrics() |>
+  print()
+```
+
+## 3. Model
+
+Of the three models considered (linear and logistic regression, KNN, and Random Forest), the model that provides the best result and is commonly used to predict binary variables, as in our case of predicting whether a labor event is a strike or a non-strike, is the logistic regression model. On top of using logit, we implemented the LASSO estimator, which provides variable selection and regularization to improve the accuracy and interpretability of the model it creates. Implementing the LASSO estimator in a logistic regression allows for the usage of a penalty value equivalent to the absolute value of the magnitude of the coefficient of the loss function. The higher the penalty value, the more severe the model's feature selection is, and vice versa for a lower penalty value. Therefore, logistic regression would be especially helpful for binary classification problems, and the LASSO estimator will deduce multiple variables in our recipe and keep only those that are significant.
+
+One of the benefits of LASSO logistics is its ability to perform feature selection. Feature selection within LASSO logistics is when the model analyzes all the variables within the model and determines which variables have the most significant impact on the outcome variable. Feature selection achieves this by shrinking the coefficients related to less important variables to zero, effectively removing irrelevant variables from the model. Given the large number of variables within the Labor Action Tracker data, this feature will be useful here in finding which variables are important in predicting whether an event is a strike. The penalty value was applied to the coefficients in the LASSO logistics model for parameter tuning and tuned through cross-validation. To find the best parameter that would produce a model with the highest accuracy, each penalty value between 0.01 and 2 was tried for the LASSO logistics regression in a 5-fold cross-validation until it found the penalty value that produces the best performance on average from the cross-validation. As evident in the figure, the best penalty tuning value was 0.01, providing a model with a 0.913 accuracy rate.
+
+```{r}
+lasso_grid_metrics |>
+  filter(.metric == "accuracy") |> 
+  ggplot(aes(x = penalty, y = mean)) +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), 
+                alpha = 0.5) +
+  geom_line(size = 1.5) +
+  scale_x_log10() +
+  labs(x = "Penalty", y = "Accuracy")
+```
+
+To evaluate the performance of our LASSO logistics regression model, we used a Confusion Matrix. The Confusion Matrix is useful in estimating the accuracy of the LASSO logistics regression model as it measures how well a model can predict the true strike and non-strike of a predictive model. Given that the goal of this model is to predict whether a labor event is a strike or a non-strike, the performance metric being prioritized was the model’s accuracy rate. After running the Confusion Matrix on the training data, the matrix revealed that the model had an accuracy rate of 0.928, meaning that the model was running with a relatively high accuracy rate. With the initially high accuracy rate on the training data, there were concerns about overfitting. However, the model still performed well when the data was run on the new 2024 LAT dataset. With a slightly lower accuracy rate, the model run on the 2024 LAT dataset had an accuracy rate of 0.881, thus confirming that the model is generalizable overall. Considering the interpretability of LASSO logistics regression, this model is highly interpretable. Through its feature selection method, it can identify and list the predictor variables that have the greatest impact on the outcome variable. The list of predictors and their coefficients is ordered to highlight the most important predictor variables and bring the coefficients of less important variables to 0, making the model easy to interpret.
+
+```{r}
+## LASSO Logistic model with the lowest RMSE
+best_accuracy <- lasso_grid |>
+  select_best("accuracy")
+
+final_lasso <- finalize_workflow(
+  lasso_wf |> add_model(tune_spec),
+  best_accuracy
+)
+```
+
+## 4. Conclusion
+
+Given the amount of missing data within the LAT data and the formation of some of the features within the dataset, assumptions about the data that may not be true were created. For instance, the Labor Organization variable had to be removed from consideration for the model because the data entry had several missing value names that indicated the same labor organization—identifying the different types of naming schema proves to be a massive undertaking. To solve this issue, allocating a unique identifier representing a labor organization may have been useful to avoid the problem created by multiple names representing one organization. In addition to missing data, numerous features contained more than one value. There was no information on why these variables were created this way or if there was a purpose for ordering the multiple values. This led our group to assume that the first value holds the most important indicator and remove the rest in order to create the model. If the data had been organized tidier, meaning one cell holds one value, the importance of the variables with multiple values in a cell may have changed the outcome of which variables had the most significant effect that led to a strike vs non-strike.
+
+```{r}
+## See which variables are most important for the prediction model
+final_lasso |>
+  fit(world_train) |>
+  extract_fit_parsnip() |>
+  vip::vi(lambda = best_accuracy$penalty) |>
+  mutate(
+    Importance = abs(Importance),
+    Variable = forcats::fct_reorder(Variable, Importance)
+  ) |>
+  filter(Importance != 0) -> vi_data
+
+# Select top 3 positive
+top_positive <- vi_data %>%
+  filter(Sign == "POS") %>%
+  slice_max(order_by = Importance, n = 3)
+
+# Select top 3 negative
+top_negative <- vi_data %>%
+  filter(Sign == "NEG") %>%
+  slice_max(order_by = Importance, n = 3)
+
+# Combine top positive and negative
+top_vi <- bind_rows(top_positive, top_negative) %>%
+  mutate(Variable = forcats::fct_reorder(Variable, Importance))
+
+# Plot
+ggplot(top_vi, aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_fill_manual(values = c("NEG" = "red", "POS" = "lightblue")) +
+  coord_flip() +  # Flip the plot to make variable names horizontal
+  theme_minimal() +
+  ggtitle("Variables with Greatest Impact on Prediction Model") +
+  theme(
+    axis.title = element_text(size = 12),  # Adjust title size if necessary
+    axis.text.x = element_text(angle = 45, vjust = 0.5, size = 8),  # Adjust text size if necessary
+    axis.text.y = element_text(size = 12, hjust = 0),  # Left-align y-axis labels and adjust size
+    plot.margin = unit(c(1, 1, 1, 3), "cm")  # Increase the right margin size
+  ) +
+  labs(y = NULL, fill = "Sign") +
+  scale_x_continuous(expand = c(0, 0)) +
+  guides(fill = guide_legend(title = "Sign", title.position = "top"))
+```
+
+Accordingly, our model strength determines which features are most important to consider when predicting whether a labor event is a strike or a non-strike. The figure above shows the features that impact the prediction of whether or not an event is a strike versus a non-strike. This information is specifically useful for employers and policymakers as it allows them to look at the features with the greatest effect and use them to implement policies that improve conditions for workers before they feel the need to strike.
+
+```{r, results='hide'}
+## Final test and compare against the held-out testing set
+# Using the best LASSO model
+last_fit(
+  final_lasso,
+  world_split
+) |> 
+  collect_metrics()
+```
+
+```{r, results='hide'}
+## Confusion matrices
+# Fit the final LASSO model and predict
+final_results <- last_fit(
+  final_lasso,
+  world_split
+)
+
+# Extract the predictions
+test_predictions <- final_results %>%
+  collect_predictions()
+
+# Create a confusion matrix
+conf_matrix <- test_predictions %>%
+  conf_mat(truth = strike_binary, estimate = .pred_class)
+
+# Print the confusion matrix
+conf_matrix
+
+# Manually calculate accuracy from the confusion matrix
+total_cases_old <- sum(conf_matrix$table)
+correct_predictions_old <- sum(diag(conf_matrix$table))
+accuracy_rate_old <- correct_predictions_old / total_cases_old
+
+# Print the accuracy rate
+print(accuracy_rate_old)
+```
+
+```{r}
+# Preliminary data wrangling and cleaning on new dataset
+# Load the test dataset
+data_new <- read_excel(here("Data Raw", "Labor action tracker data 2.26.24.xlsx"))
+```
+
+```{r, fig.show='hide', results='hide'}
+# Creating a county index for the new dataset
+
+# filtering only labor actions with one location (note you should handle multiple locations
+# as determined by your group) and separating latitude and longitude into new variables
+data_new <- data_new |>
+  clean_names() |>
+  filter(number_of_locations == 1) |>
+  mutate(lat = as.numeric(sub(",.*", "", latitude_longitude)),
+         long = as.numeric(sub(".*, ", "", latitude_longitude))) |>
+  select(-latitude_longitude) |>
+  filter(!is.na(lat), !is.na(long))
+
+# download the U.S. counties shape file
+counties <- counties(cb = TRUE)
+
+# convert the latitude and longitude into sf objects
+data_new <- st_as_sf(data_new, 
+                     coords = c("long", "lat"), 
+                     crs = 4326)
+
+# transform counties shape file into the same CRS as lat_long
+counties <- st_transform(counties, st_crs(data_new))
+
+# spatial join of data with counties
+data_new <- st_join(data_new, counties)
+
+# find the county variable and rename it
+names(data_new)[which(names(data_new) == "NAMELSAD")] <- "county"
+```
+
+```{r}
+## Data join again
+# join with tha LAT dataset
+data_new <- left_join(data_new, combined_acs, 
+                       by = c("NAME" = "county", "STATE_NAME" = "state"))
+
+data_new <- data_new %>% select(-contains(".x"))
+data_new <- data_new %>% select(-contains(".y"))
+```
+
+```{r}
+## Remove all white spaces
+# creating a function to remove white spaces safely
+safeTrim <- function(x) {
+  if(is.factor(x)) { 
+    as.factor(trimws(as.character(x)))
+  } else if(is.character(x)) {
+    trimws(x)
+  } else if(is.numeric(x)) {
+    x 
+  } else {
+    x 
+  }
+}
+
+# executing the safeTrim function
+data_new[] <- lapply(data_new, safeTrim)
+
+# cleaning the column names
+data_new <- clean_names(data_new)
+```
+
+```{r}
+# Feature Engineering
+
+## Creating a binary strike for dependent variable
+# Remove the lockout values from strike_or_protest column
+data_new <- data_new[data_new$strike_or_protest != "Lockout", ]
+
+# Create a binary variable for strike
+data_new$strike_binary <- ifelse(data_new$strike_or_protest == "Strike", 1, 0)
+
+# Move the strike binary variable to the front
+last_column <- ncol(data_new)
+
+data_new <- data_new[, c(1, last_column, 2:(last_column - 1))]
+```
+
+```{r}
+## Adjust duration
+# Define a function to convert minutes or hours to days
+convert_to_days <- function(amount, unit) {
+  result <- ifelse(unit == "Minutes", amount / (24 * 60),
+                   ifelse(unit == "Hours", amount / 24, amount))
+  return(result)}
+
+# Apply the conversion function to the data frame
+# Transfer all durations into day-based measurement
+data_new <- data_new %>%
+  mutate(duration_amount = ifelse(duration_unit %in% c("Minutes", "Hours"),
+                                  convert_to_days(duration_amount, duration_unit),
+                                  duration_amount))
+
+# Changing all NAs in duration_amount to a value of 1-day
+data_new$duration_amount[is.na(data_new$duration_amount)] <- 1
+```
+
+```{r}
+## Deal with timestamp
+data_new$start_date <- as.Date(data_new$start_date, format = "%Y-%m-%d")
+
+data_new$end_date <- as.Date(data_new$end_date, format = "%Y-%m-%d")
+```
+
+```{r}
+## Keep only the neccesary column
+data_new <- select(data_new, c(strike_binary,
+                                employer,
+                                industry,
+                               address,
+                               city,
+                               state,
+                               zip_code,
+                               approximate_number_of_participants,
+                               duration_amount,
+                               authorized,
+                               worker_demands,
+                               time_to_work,
+                               hh_total,
+                               hh_low_income,
+                               population,
+                               old,
+                               hh_low_income_prop,
+                               old_prop,
+                               old_prop_high,
+                               income_q,
+                               ed_total,
+                               other_race,
+                               other_race_prop,
+                               other_race_min,
+                               higher_ed_prop,
+                               aging_q
+                              ))
+```
+
+```{r}
+## Remove geometry variable
+data_new <- select(data_new, -c(geometry))
+```
+
+```{r}
+## Handling NAs in categorical columns
+# Changing NAs to the categorical value of "missing"
+data_new <- data_new %>%
+  mutate(
+    employer = ifelse(is.na(employer), "MISSING", employer),
+    industry = ifelse(is.na(industry), "MISSING", industry),
+    address = ifelse(is.na(address), "MISSING", address),
+    zip_code = ifelse(is.na(zip_code), "MISSING", zip_code),
+    worker_demands = ifelse(is.na(worker_demands), "MISSING", worker_demands),
+    authorized = ifelse(is.na(authorized), "MISSING", authorized),
+    city = ifelse(is.na(city), "MISSING", city)
+  )
+```
+
+```{r}
+## Deal with multiple values in categorical columns
+data_new$employer <- sapply(strsplit(data_new$employer, ";"), function(x) x[1])
+
+data_new$industry <- sapply(strsplit(data_new$industry, ","), function(x) x[1])
+
+data_new$worker_demands <- sapply(strsplit(data_new$worker_demands, ","), function(x) x[1])
+
+```
+
+```{r}
+## Fix Variable type
+data_new$strike_binary <- as.factor(data_new$strike_binary)
+
+data_new$authorized <- as.character(data_new$authorized)
+
+```
+
+```{r}
+## Check the data
+# Creating a data frame to see the number of NAs by columns
+na_count_new <- data.frame(
+  column = names(data_new),
+  na_count = sapply(data_new, function(x) sum(is.na(x))),
+  type = sapply(data_new, function(x) class(x)[1])
+)
+
+# Display the data frame
+view(na_count_new)
+
+# export the dataset
+write.csv(data_new, file = "final_data_new.csv", row.names = FALSE)
+```
+
+```{r, results='hide'}
+# Using the tuned LASSO Logistic Model on the new dataset
+final_fit <- final_lasso |>
+  fit(world_train)
+
+# Making predictions on the testing data
+  pred_new <- predict(final_fit,
+                    new_data = data_new,
+                    type = "class")
+  
+  # Binding the actual and predicted Y's together in a data frame
+  df_eval <- cbind("strike_binary" = data_new$strike_binary, pred_new)
+  
+  # Evaluating the model with a confusion matrix
+  cm <- conf_mat(data = df_eval,
+           truth = strike_binary,
+           estimate = .pred_class)
+cm
+
+# Collecting the mean accuracy rate for old data and new data
+
+# Manually calculate accuracy from the confusion matrix
+total_cases <- sum(cm$table)
+correct_predictions <- sum(diag(cm$table))
+accuracy_rate <- correct_predictions / total_cases
+
+# Print the accuracy rate
+print(accuracy_rate)
+```
